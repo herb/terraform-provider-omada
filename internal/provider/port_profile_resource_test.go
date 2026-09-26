@@ -5,6 +5,7 @@ package provider
 
 import (
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -88,6 +89,65 @@ resource "omada_port_profile" "test" {
 					resource.TestCheckResourceAttr("omada_port_profile.test", "stp_edge_port", "true"),
 					resource.TestCheckResourceAttr("omada_port_profile.test", "tagged_network_ids.#", "1"),
 					checkPreserved,
+				),
+			},
+		},
+	})
+}
+
+// TestAccPortProfileResource_tagAllUpdate covers network_tags_setting = 0. The
+// controller accepts it on create but stores an update carrying it as 2 with the
+// tagged list emptied (the mock reproduces that), so the provider must refuse
+// the update before writing, and moving the profile to 2 with an explicit list
+// must still work.
+func TestAccPortProfileResource_tagAllUpdate(t *testing.T) {
+	srv := newMockController(t)
+
+	config := func(nts, stpPriority int, tagged string) string {
+		return testProviderConfig(srv.URL) + fmt.Sprintf(`
+resource "omada_port_profile" "test" {
+  name                 = "trunk"
+  native_network_id    = "net-1"
+  tagged_network_ids   = [%s]
+  network_tags_setting = %d
+  vlan_config_enable   = true
+  spanning_tree_enable = false
+  stp_priority         = %d
+}`, tagged, nts, stpPriority)
+	}
+
+	untouched := func() {
+		for _, p := range rawStore(t, srv.URL, "profiles") {
+			if nts, _ := p["networkTagsSetting"].(float64); nts != 0 {
+				t.Fatalf("the refused update reached the controller: networkTagsSetting = %v", p["networkTagsSetting"])
+			}
+			if ids, _ := p["tagNetworkIds"].([]any); len(ids) != 2 {
+				t.Fatalf("the refused update reached the controller: tagNetworkIds = %v", p["tagNetworkIds"])
+			}
+		}
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config(0, 128, `"net-a", "net-b"`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("omada_port_profile.test", "network_tags_setting", "0"),
+					resource.TestCheckResourceAttr("omada_port_profile.test", "tagged_network_ids.#", "2"),
+				),
+			},
+			{
+				Config:      config(0, 64, `"net-a", "net-b"`),
+				ExpectError: regexp.MustCompile(`Refusing to update a port profile`),
+			},
+			{
+				PreConfig: untouched,
+				Config:    config(2, 64, `"net-a", "net-b"`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("omada_port_profile.test", "network_tags_setting", "2"),
+					resource.TestCheckResourceAttr("omada_port_profile.test", "tagged_network_ids.#", "2"),
+					resource.TestCheckResourceAttr("omada_port_profile.test", "stp_priority", "64"),
 				),
 			},
 		},

@@ -633,6 +633,10 @@ func newMockController(t *testing.T) *httptest.Server {
 			// Simulate controller-owned keys the provider must not clobber.
 			in["prohibitModify"] = false
 			in["flag"] = 2
+			// The controller assigns type 2 to every profile a user creates.
+			if _, ok := in["type"]; !ok {
+				in["type"] = 2
+			}
 			if stp, ok := in["spanningTreeSetting"].(map[string]any); ok {
 				stp["instances"] = []any{}
 			}
@@ -661,6 +665,15 @@ func newMockController(t *testing.T) *httptest.Server {
 			var in map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&in)
 			in["id"] = id
+			// Controller quirk (6.3.0.45): a PATCH that sets networkTagsSetting
+			// 0 ("tag every network") on a custom profile is stored as 2 ("tag
+			// a specific list") with the list emptied. POST keeps 0.
+			if nts, ok := in["networkTagsSetting"].(float64); ok && nts == 0 {
+				if typ, _ := in["type"].(float64); typ != 0 {
+					in["networkTagsSetting"] = 2
+					in["tagNetworkIds"] = []any{}
+				}
+			}
 			profs[id] = in
 			writeEnvelope(w, 0, "", in)
 		}

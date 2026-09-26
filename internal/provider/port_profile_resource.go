@@ -20,10 +20,25 @@ import (
 )
 
 var (
-	_ resource.Resource                = &portProfileResource{}
-	_ resource.ResourceWithConfigure   = &portProfileResource{}
-	_ resource.ResourceWithImportState = &portProfileResource{}
+	_ resource.Resource                   = &portProfileResource{}
+	_ resource.ResourceWithConfigure      = &portProfileResource{}
+	_ resource.ResourceWithImportState    = &portProfileResource{}
+	_ resource.ResourceWithValidateConfig = &portProfileResource{}
 )
+
+// tagAllNetworks is networkTagsSetting 0, "tag every network". On a custom
+// profile (type 2) the controller accepts it on create but not on update: a
+// PATCH carrying 0 is stored as 2 ("tag a specific list") with tagNetworkIds
+// emptied, so the ports tag no network at all. Seen twice on controller
+// 6.3.0.45, once from a profile created with 0 and once from one already at 2.
+// The built-in "All" profile (type 0) is the only one the controller itself
+// keeps at 0.
+const tagAllNetworks = 0
+
+const tagAllDetail = "On a custom profile the controller accepts network_tags_setting = 0 (tag every network) " +
+	"when the profile is created, but an update that carries it is stored as 2 (tag a specific list) with " +
+	"tagged_network_ids emptied, which leaves the ports tagging no network. Every update of a profile at 0 " +
+	"carries it. Use 2 and list the networks in tagged_network_ids instead."
 
 func NewPortProfileResource() resource.Resource { return &portProfileResource{} }
 
@@ -103,7 +118,9 @@ func (r *portProfileResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"untagged_network_ids": schema.ListAttribute{ElementType: types.StringType, Optional: true, Computed: true, MarkdownDescription: "Additional untagged network IDs."},
 			"vlan_config_enable":   b("Custom VLAN tagging on the profile."),
 
-			"network_tags_setting": i("Network tagging mode."),
+			"network_tags_setting": i("Network tagging mode: `0` = tag every network, `1` = tag none, `2` = tag the networks in `tagged_network_ids`. " +
+				"Use `2` with an explicit list rather than `0`: the controller accepts `0` on create, but an update carrying it " +
+				"is stored as `2` with the tagged list emptied, so the provider refuses to update a profile at `0`."),
 			"voice_network_enable": b("Voice network."),
 			"voice_dscp_enable":    b("Voice DSCP marking."),
 			"dot1x":                i("802.1X mode."),
@@ -138,6 +155,21 @@ func (r *portProfileResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"stp_bpdu_filter":      b("STP BPDU filter."),
 			"stp_bpdu_forward":     b("STP BPDU forwarding."),
 		},
+	}
+}
+
+// ValidateConfig warns about network_tags_setting = 0. Create works, so an
+// existing config that never changes keeps working, but every later update is
+// refused (see Update), and the plan is the place to find that out.
+func (r *portProfileResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var cfg portProfileResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !cfg.NetworkTagsSetting.IsNull() && !cfg.NetworkTagsSetting.IsUnknown() && cfg.NetworkTagsSetting.ValueInt64() == tagAllNetworks {
+		resp.Diagnostics.AddAttributeWarning(path.Root("network_tags_setting"),
+			"network_tags_setting = 0 cannot be updated", tagAllDetail)
 	}
 }
 
@@ -347,6 +379,13 @@ func (r *portProfileResource) Update(ctx context.Context, req resource.UpdateReq
 	siteID, err := r.data.client.ResolveSiteID(ctx, r.siteName(plan))
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to resolve site", err.Error())
+		return
+	}
+	// Refuse before writing anything: the controller would store this as "tag
+	// a specific list" with no networks, and on a trunk that is an outage.
+	if !plan.NetworkTagsSetting.IsNull() && !plan.NetworkTagsSetting.IsUnknown() && plan.NetworkTagsSetting.ValueInt64() == tagAllNetworks {
+		resp.Diagnostics.AddAttributeError(path.Root("network_tags_setting"),
+			"Refusing to update a port profile with network_tags_setting = 0", tagAllDetail)
 		return
 	}
 	fields, diags := r.fieldsFrom(ctx, plan)

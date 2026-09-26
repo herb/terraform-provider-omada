@@ -47,7 +47,7 @@ resource "omada_port_profile" "trunk" {
 - `loopback_detect_vlan_based` (Boolean) VLAN-based loopback detection.
 - `mld_fast_leave_enable` (Boolean) MLD fast leave.
 - `native_network_id` (String) Untagged/native network (VLAN) ID for the port.
-- `network_tags_setting` (Number) Network tagging mode.
+- `network_tags_setting` (Number) Network tagging mode: `0` = tag every network, `1` = tag none, `2` = tag the networks in `tagged_network_ids`. Use `2` with an explicit list rather than `0`: the controller accepts `0` on create, but an update carrying it is stored as `2` with the tagged list emptied, so the provider refuses to update a profile at `0`.
 - `poe` (Number) PoE mode: 0=off, 1=on, 2=keep-device-setting.
 - `port_isolation_enable` (Boolean) Port isolation.
 - `site` (String) Site name. Defaults to the primary site. Changing forces replacement.
