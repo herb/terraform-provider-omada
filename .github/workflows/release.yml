@@ -9,6 +9,10 @@ permissions: {}
 
 jobs:
   goreleaser:
+    # Fork tags (v*-herb.*) are handled by .github/workflows/release-fork.yml.
+    # Skipping them here avoids running the GPG-signed Registry release on a
+    # fork that has no signing secrets and does not want a Registry release.
+    if: ${{ !contains(github.ref_name, '-herb.') && github.repository == 'wncservices/terraform-provider-omada' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
