@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/provider"
@@ -64,6 +65,86 @@ func newMockController(t *testing.T) *httptest.Server {
 
 	mux.HandleFunc("/abc123/api/v2/login", func(w http.ResponseWriter, _ *http.Request) {
 		writeEnvelope(w, 0, "", map[string]any{"token": "tok-xyz"})
+	})
+
+	// Controller auto-backup singleton. Stateful like the live document, and it
+	// keeps the fields the resource must PRESERVE rather than manage: the
+	// file-server credentials (serverConfig) and the retain* flags, plus the
+	// runtime fields (nowStatus, dataSheets) that must never appear in a write.
+	backupDoc := map[string]any{
+		"enable":            false,
+		"occurrence":        map[string]any{"timingType": 3, "hour": 12, "minute": 0, "dayOfMonth": 1},
+		"maxNumberOfFile":   7,
+		"retention":         30,
+		"type":              "soft",
+		"nowStatus":         -1,
+		"dataSheets":        []any{},
+		"retainSetting":     true,
+		"retainUser":        false,
+		"retainAuthRecord":  true,
+		"retainFirmwareLog": true,
+		// A credential-bearing destination the resource must not touch.
+		"fileServerConfig": map[string]any{
+			"enable": false, "protocol": "FTP",
+			"serverConfig": []any{map[string]any{"user": "op", "password": "SECRET-FTP"}},
+		},
+	}
+	backupMu := sync.Mutex{}
+	var backupPuts int64
+	mux.HandleFunc("/abc123/api/v2/autoBackup/autoBackupTask", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Csrf-Token") != "tok-xyz" {
+			writeEnvelope(w, -1400, "invalid csrf token", nil)
+			return
+		}
+		backupMu.Lock()
+		defer backupMu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			writeEnvelope(w, 0, "", backupDoc)
+		case http.MethodPut:
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeEnvelope(w, -1001, "bad body", nil)
+				return
+			}
+			// Runtime fields must never be written back.
+			if _, ok := body["nowStatus"]; ok {
+				writeEnvelope(w, -1001, "nowStatus must not be written", nil)
+				return
+			}
+			if _, ok := body["dataSheets"]; ok {
+				writeEnvelope(w, -1001, "dataSheets must not be written", nil)
+				return
+			}
+			// A PUT that carries only {"enable": false} is the disable path; it
+			// must leave every other field, including the credentials, intact.
+			for k := range body {
+				backupDoc[k] = body[k]
+			}
+			atomic.AddInt64(&backupPuts, 1)
+			writeEnvelope(w, 0, "", nil)
+		default:
+			writeEnvelope(w, -1600, "unsupported method", nil)
+		}
+	})
+	mux.HandleFunc("/debug/backup", func(w http.ResponseWriter, _ *http.Request) {
+		backupMu.Lock()
+		defer backupMu.Unlock()
+		_ = json.NewEncoder(w).Encode(backupDoc)
+	})
+	mux.HandleFunc("/debug/backup-puts", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(atomic.LoadInt64(&backupPuts))
+	})
+	mux.HandleFunc("/debug/backup-seed", func(w http.ResponseWriter, r *http.Request) {
+		var doc map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&doc); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		backupMu.Lock()
+		defer backupMu.Unlock()
+		backupDoc = doc
+		writeEnvelope(w, 0, "", nil)
 	})
 
 	requireToken := func(w http.ResponseWriter, r *http.Request) bool {

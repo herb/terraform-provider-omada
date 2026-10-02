@@ -253,6 +253,7 @@ func (p *OmadaProvider) Resources(_ context.Context) []func() resource.Resource 
 		// Controller-scoped: no site in the path, no `site` attribute.
 		NewControllerSettingsResource,
 		NewFirmwareUpgradeScheduleResource,
+		NewBackupResource,
 	}
 }
 
